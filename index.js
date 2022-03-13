@@ -37,8 +37,6 @@ const asset = new Asset("TestNFT", issuer.publicKey())
 async function issueTestNFT() {
     const fee = await getFee();
 
-    console.log("fee:", fee);
-
     const sourceAccount = await server.loadAccount(source.publicKey());
 
     let tx = new TransactionBuilder(sourceAccount, {
@@ -61,7 +59,13 @@ async function issueTestNFT() {
         source: issuer.publicKey(),
         destination: source.publicKey(),
         asset: asset,
-        amount: "0.0000001"
+        amount: "0.0000003"
+    }))
+
+    tx.addOperation(Operation.manageData({
+        source: issuer.publicKey(),
+        name: "ipfshash",
+        value: ""
     }))
 
     tx.addOperation(Operation.setOptions({
@@ -95,9 +99,9 @@ async function issueTestNFT() {
 
 
 (async () => {
-    //
+    //await issueTestNFT()
 
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 1; i++) {
 
         try {
             const vm = new NodeVM({
@@ -128,7 +132,9 @@ async function issueTestNFT() {
 
             let ticketTxHash = null;
             try {
-                let txXdr = await contribute(vm, txFunctionCode, i)
+                //let txXdr = await createCrowdLottery(vm, txFunctionCode)
+                //let txXdr = await contribute(vm, txFunctionCode, i)
+                let txXdr = await distribute(vm, txFunctionCode)
                 //console.log("txXdr:", txXdr)
                 txHash = await submitXDR(txXdr, i);
             } catch (e) {
@@ -166,9 +172,17 @@ async function createCrowdLottery(vm, txFunctionCode){
 async function contribute(vm, txFunctionCode, i){
     return await vm.run(txFunctionCode, 'vm.js')({
         action: 'contribute',
-        crowdlotteryPublicKey: 'GD5B6IIJDREAK6IMFZMUEFAC2J66WJS3Q4U3E5DKSQ77ZJT6O4436LLH',
+        crowdlotteryPublicKey: 'GC4EVEUP33GQHTNVBQJYEIBMTBJ355HUCFM652X6RSBQ2ICDL4DDMLRG',
         source: contributors[i].publicKey(),
         amount: '21.5'
+    })
+};
+
+async function distribute(vm, txFunctionCode){
+    return await vm.run(txFunctionCode, 'vm.js')({
+        action: 'distribute',
+        crowdlotteryPublicKey: 'GC4EVEUP33GQHTNVBQJYEIBMTBJ355HUCFM652X6RSBQ2ICDL4DDMLRG',
+        txHashRandomSeed: "aa9f713387e5c90abb9d2f7c752a4a85caf2a69898a61d28cf8bf082e1d1e101"
     })
 };
 
@@ -176,17 +190,13 @@ async function submitXDR(xdr, i) {
 
     let tx = new Transaction(xdr, Networks.TESTNET);
 
-    //tx.sign(masterKeypair);
-
-    //tx.sign(buyerKeypair);
     tx.sign(signerKeypair);
-    tx.sign(contributors[i]);
+    //tx.sign(contributors[i]);
 
     try {
         const txResult = await server.submitTransaction(tx);
         //console.log(JSON.stringify(txResult, null, 2));
-        console.log('Success!');
-        console.log('tx id:', txResult.id);
+        console.log('Success! tx id:', txResult.id);
 
         return txResult.hash;
     } catch (e) {

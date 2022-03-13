@@ -1,4 +1,4 @@
-import { TransactionBuilder, Server, Networks, Operation, Asset, Keypair, AuthRequiredFlag, AuthRevocableFlag } from 'stellar-sdk'
+import { TransactionBuilder, Server, Networks, Operation, Asset, Keypair, AuthRequiredFlag, AuthRevocableFlag, Claimant } from 'stellar-sdk'
 import BigNumber from 'bignumber.js';
 
 const masterPK = STELLAR_NETWORK === 'PUBLIC'
@@ -44,7 +44,7 @@ function validateInputs(source, assetCode, issuer, deadline, threshold, finishOn
     validatePublicKey(source, "source")
     validatePublicKey(issuer, "issuer")
 
-    console.log(`${deadline}  ${Date.now()}`)
+    //console.log(`${deadline}  ${Date.now()}`)
     if(!Number.isInteger(deadline) || deadline < Date.now())
         throw {message: 'Invalid deadline.'}
 
@@ -70,9 +70,9 @@ async function create(body) {
     const balance = await getBalance(sourceAccount, assetCode, issuer)
     const isIssuerLocked = isLocked(issuerAccount)
 
-    console.log(`balance: ${balance}`)
-    console.log(`isIssuerLocked: ${isIssuerLocked}`)
-    console.log(`config: ${JSON.stringify(config)}`)
+    // console.log(`balance: ${balance}`)
+    // console.log(`isIssuerLocked: ${isIssuerLocked}`)
+    // console.log(`config: ${JSON.stringify(config)}`)
     //console.log(`issuerAccount: ${JSON.stringify(issuerAccount)}`)
 
 
@@ -101,6 +101,7 @@ async function create(body) {
     tx = lock(tx, crowdLotteryKeypair.publicKey(), config.signers)
 
     //If issuer is not locked, lock it with turrets.
+    //The issuer might be used to directly issue the asset in distribution.
     if (!isIssuerLocked) {
 
         tx.addOperation(Operation.beginSponsoringFutureReserves({
@@ -114,7 +115,9 @@ async function create(body) {
             source: issuer
         }));
 
-    } else if(typeof balance !== "undefined") {
+    }
+
+    if(typeof balance !== "undefined") {
 
         tx.addOperation(Operation.changeTrust({
             source: crowdLotteryKeypair.publicKey(),
@@ -135,7 +138,7 @@ async function create(body) {
     const names = ["createdBy", "assetCode", "issuer", "deadline", "threshold", "finishOnThreshold", "distributionType", "distributionCoeff", "distributionAmount", "contributionAmount", "minContributionAmount", "contributionFlatFee", "contributionPerFee"]
 
     for(let i=0; i < settings.length; i++){
-        console.log(`${names[i]} ${settings[i]} ${typeof settings[i]}`)
+        //console.log(`${names[i]} ${settings[i]} ${typeof settings[i]}`)
         tx.addOperation(Operation.manageData({
             source: crowdLotteryKeypair.publicKey(),
             name: names[i],
@@ -170,12 +173,14 @@ async function contribute(body) {
     const settings = getCrowdLotterySettings(crowdlotteryAccount)
     const clBalance = getBalance(crowdlotteryAccount, "XLM", "")
 
-    console.log(`settings: ${JSON.stringify(settings)}`)
-    console.log(`clBalance: ${clBalance}`)
+    // console.log(`settings: ${JSON.stringify(settings)}`)
+    // console.log(`clBalance: ${clBalance}`)
 
-    if (isCrowdLotteryFinished(settings, clBalance))
+    if (isCrowdLotteryFinished(settings, clBalance)) {
+        //contribution stage is over, distribute now
         console.log('Contributions are not accepted anymore.')
         //throw {message: 'Contributions are not accepted anymore.'}
+    }
 
     const clFlatFee = new BigNumber(settings.contributionFlatFee)
     const clPerFee = new BigNumber(settings.contributionPerFee)
@@ -197,19 +202,19 @@ async function contribute(body) {
 
     const amountAfterFee = _amount.minus(feeAmount).minus(clFeeAmount)
 
-    if (amountAfterFee.isNegative() || _amount.compareTo(BigNumber(settings.minContributionAmount)) == -1) {
+    if (amountAfterFee.isNegative() /*|| _amount.compareTo(BigNumber(settings.minContributionAmount)) == -1*/) {
         throw {message: 'Contribution is too low.'}
     }
 
     const fee = await getFee()
 
-    console.log(`flatFee: ${flatFee}`)
-    console.log(`perFee: ${perFee}`)
-    console.log(`clFlatFee: ${clFlatFee}`)
-    console.log(`clPerFee: ${clPerFee}`)
-    console.log(`feeAmount: ${clAmountPerFee}`)
-    console.log(`clFeeAmount: ${clAmountPerFee}`)
-    console.log(`amountAfterFee: ${amountAfterFee}`)
+    // console.log(`flatFee: ${flatFee}`)
+    // console.log(`perFee: ${perFee}`)
+    // console.log(`clFlatFee: ${clFlatFee}`)
+    // console.log(`clPerFee: ${clPerFee}`)
+    // console.log(`feeAmount: ${clAmountPerFee}`)
+    // console.log(`clFeeAmount: ${clAmountPerFee}`)
+    // console.log(`amountAfterFee: ${amountAfterFee}`)
 
     let tx = new TransactionBuilder(sourceAccount, {
         fee,
@@ -290,7 +295,16 @@ async function distribute(body) {
 
     const crowdlotteryAccount = await server.loadAccount(crowdlotteryPublicKey)
     const settings = getCrowdLotterySettings(crowdlotteryAccount)
-    const asset = new Asset("CL", crowdlotteryPublicKey)
+    const trackingAsset = new Asset("CL", crowdlotteryPublicKey)
+    const assetToDistribute = new Asset(settings.assetCode, settings.issuer)
+
+
+    const clBalance = getBalance(crowdlotteryAccount, "XLM", "")
+
+    if (!isCrowdLotteryFinished(settings, clBalance)) {
+        console.log("Distribution hasn't started yet.")
+        //throw {message: 'Distribution hasn't started yet.'}
+    }
 
     const issuerAccount = await server.loadAccount(settings.issuer)
     const isIssuerLocked = isLocked(issuerAccount)
@@ -298,8 +312,12 @@ async function distribute(body) {
     const randomSeed = Buffer.from(txHashRandomSeed, 'hex').slice(-4).readUInt32BE(0);
     const random = new Random(randomSeed);
 
+
+    const balance = await getBalance(crowdlotteryAccount, settings.assetCode, settings.issuer)
+    console.log(`balance: ${balance}`)
+
     let page = await server.trades()
-        .forAssetPair(asset, Asset.native())
+        .forAssetPair(trackingAsset, Asset.native())
         .limit(200)
         .order('desc')
         .call()
@@ -308,30 +326,38 @@ async function distribute(body) {
     let sumContributions = 0
 
     while (page.records.length > 0){
-        for (trade of page.records) {
+        for (const trade of page.records) {
             contributors.push({
                 "contributor": trade["counter_account"],
-                "contribution": parseFloat(rade["counter_amount"])
+                "contribution": parseFloat(trade["counter_amount"])
             })
             sumContributions += parseFloat(trade["counter_amount"])
         }
         page = await page.next();
     }
 
+    //console.log(`contributors: ${JSON.stringify(contributors)}`)
+
     let numReceivers = getNumReceivers(settings)
+    //console.log(`numReceivers: ${numReceivers}`)
+    numReceivers = 3
+
     let drawnContributorIndices = new Set()
     let drawnContributors = []
     for (let i = 0; i < numReceivers; i++) {
 
-        let contributorIndex = drawContributorIndex(contributors, random)
+        let contributorIndex = drawContributorIndex(contributors, sumContributions, random)
         while (drawnContributorIndices.has(contributorIndex)) {
-            contributorIndex = drawContributorIndex(contributors, random)
+            contributorIndex = drawContributorIndex(contributors, sumContributions, random)
         }
+
+        //console.log(`contributorIndex: ${contributorIndex}`)
         drawnContributorIndices.add(contributors[contributorIndex])
         drawnContributors.push(contributors[contributorIndex]["contributor"])
     }
 
     let lastDistributedIndex = getLastDistributedIndex(crowdlotteryAccount)
+    console.log(`lastDistributedIndex: ${lastDistributedIndex}`)
 
     const fee = await getFee()
 
@@ -342,24 +368,29 @@ async function distribute(body) {
     })
 
     const numTxDistributions = 1;
-    for (let i = 0, i < numTxDistributions; i++){
+    for (let i = 0; i < numTxDistributions; i++){
         lastDistributedIndex += 1;
-        tx.addOperation(Operation.payment({
-            source: crowdlotteryPublicKey,
-            destination: drawnContributors[lastDistributedIndex],
-            asset: Asset.native(),
-            amount: feeAmount.toFixed(7)
+
+        tx.addOperation(Operation.createClaimableBalance({
+                source: crowdlotteryPublicKey,
+                asset: assetToDistribute,
+                amount: "0.0000001",
+                claimants: [new Claimant(
+                    drawnContributors[lastDistributedIndex],
+                    Claimant.predicateBeforeAbsoluteTime("4102444800000")
+                )]
         }))
     }
 
     tx.addOperation(Operation.manageData({
-        source: crowdLotteryKeypair.publicKey(),
+        source: crowdlotteryPublicKey,
         name: "lastDistributedIndex",
-        value: lastDistributedIndex
+        value: lastDistributedIndex.toString()
     }))
 
+    tx = tx.setTimeout(0).build()
 
-
+    return tx.toXDR('base64')
 
 }
 
@@ -377,10 +408,11 @@ function getLastDistributedIndex(crowdlotteryAccount) {
     return lastDistributedIndex
 }
 
-function drawContributorIndex(contributors, random) {
+function drawContributorIndex(contributors, sumContributions, random) {
     const rand = random.getRandomFloat(0, sumContributions)
     let sum = 0
-    for(let i = 0; i < contributors.lenght; i++) {
+
+    for(let i = 0; i < contributors.length; i++) {
         sum += contributors[i]["contribution"]
         if (sum >= rand) {
             return i
@@ -475,11 +507,7 @@ function decodeManageDataString(str) {
 }
 
 function getBalance(account, assetCode, issuer) {
-    console.log("getBalance")
-    console.log(account)
-
     for (const balance of account.balances) {
-        console.log(`${balance.asset_type} ${balance.asset_code} ${balance.asset_issuer}`)
         if (balance.asset_type.startsWith("credit") &&
             balance.asset_code == assetCode &&
             balance.asset_issuer == issuer){
@@ -493,7 +521,7 @@ function getBalance(account, assetCode, issuer) {
 }
 
 function getCrowdLotterySettings(crowdlotteryAccount) {
-    console.log("getCrowdLotterySettings")
+    //console.log("getCrowdLotterySettings")
 
     const settingNames = ["createdBy", "assetCode", "issuer", "contributionAmount", "threshold", "deadline", "contributionFlatFee", "contributionPerFee"]
     let settings = {}
@@ -505,7 +533,7 @@ function getCrowdLotterySettings(crowdlotteryAccount) {
         settings[name] = decodeManageDataString(crowdlotteryAccount.data_attr[name])
     }
 
-    console.log(JSON.stringify(settings))
+    //console.log(JSON.stringify(settings))
     return settings
 }
 
