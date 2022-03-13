@@ -1,4 +1,4 @@
-import { TransactionBuilder, Server, Networks, Operation, Asset } from 'stellar-sdk'
+import { TransactionBuilder, Server, Networks, Operation, Asset, Keypair } from 'stellar-sdk'
 import BigNumber from 'bignumber.js';
 
 const masterPK = STELLAR_NETWORK === 'PUBLIC'
@@ -44,7 +44,8 @@ function validateInputs(source, assetCode, issuer, deadline, threshold, finishOn
     validatePublicKey(source, "source")
     validatePublicKey(issuer, "issuer")
 
-    if(!Number.isInteger(deadline) || deadline < Date.now())
+    console.log(`${deadline}  ${Date.now()}`)
+    if(!Number.isInteger(deadline) || deadline > Date.now())
         throw {message: 'Invalid deadline.'}
 
     if (distributionType != "constant" && distributionType != "proportional")
@@ -64,8 +65,14 @@ async function create(body) {
     const issuerAccount = await server.loadAccount(issuer)
     const crowdLotteryKeypair = Keypair.random()
     const asset = new Asset(assetCode, issuer)
-    const balance = getBalance(sourceAccount)
+    const balance = await getBalance(sourceAccount, assetCode, issuer)
     const isIssuerLocked = isLocked(issuerAccount)
+
+    console.log(`balance: ${balance}`)
+    console.log(`isIssuerLocked: ${isIssuerLocked}`)
+    console.log(`config: ${JSON.stringify(config)}`)
+    //console.log(`issuerAccount: ${JSON.stringify(issuerAccount)}`)
+
 
     let tx = new TransactionBuilder(sourceAccount, {
         fee,
@@ -75,13 +82,14 @@ async function create(body) {
     tx.addOperation(Operation.beginSponsoringFutureReserves({
         source: source,
         sponsoredId: crowdLotteryKeypair.publicKey()
-    }));
+    }))
 
     tx.addOperation(Operation.createAccount({
         source: source,
         destination: crowdLotteryKeypair.publicKey(),
         startingBalance: '0'
     }))
+
 
     tx = lock(tx, crowdLotteryKeypair.publicKey(), config.signers)
 
@@ -100,38 +108,48 @@ async function create(body) {
         }));
 
     } else if(typeof balance !== "undefined") {
+
+        tx.addOperation(Operation.changeTrust({
+            source: crowdLotteryKeypair.publicKey(),
+            asset: asset
+        }))
+
         //Lock token/NFT which will be distributed
         tx.addOperation(Operation.payment({
             source: source,
             destination: crowdLotteryKeypair.publicKey(),
             asset: asset,
-            amount: balance
+            amount: BigNumber(balance).toFixed(7)
         }))
+
     }
 
     const settings = [source, issuer, deadline, threshold, finishOnThreshold, distributionType, distributionCoeff, distributionAmount, contributionAmount, minContributionAmount, contributionFlatFee, contributionPerFee]
     const names = ["createdBy", "issuer", "deadline", "threshold", "finishOnThreshold", "distributionType", "distributionCoeff", "distributionAmount", "contributionAmount", "minContributionAmount", "contributionFlatFee", "contributionPerFee"]
 
     for(let i=0; i < settings.length; i++){
+        console.log(`${names[i]} ${settings[i]} ${typeof settings[i]}`)
         tx.addOperation(Operation.manageData({
             source: crowdLotteryKeypair.publicKey(),
             name: names[i],
-            value: settings[i]
-        }));
+            value: settings[i].toString()
+        }))
     }
 
     tx.addOperation(Operation.endSponsoringFutureReserves({
         source: crowdLotteryKeypair.publicKey()
-    }));
+    }))
 
     tx.addOperation(Operation.payment({
         source: source,
         destination: feePK,
         asset: Asset.native(),
-        amount: config.creationFee
+        amount: BigNumber(config.creationFee).toFixed(7)
     }))
 
     tx = tx.setTimeout(0).build()
+
+    tx.sign(crowdLotteryKeypair)
 
     return tx.toXDR('base64')
 }
@@ -145,7 +163,7 @@ async function contribute(body) {
     const settings = getCrowdLotterySettings(crowdlotteryAccount)
     const clBalance = getBalance(crowdlotteryAccount, "XLM", "")
 
-    if isCrowdLotteryFinished(settings, clBalance)
+    if (isCrowdLotteryFinished(settings, clBalance))
         throw {message: 'Contributions are not accepted anymore.'}
 
     const clFlatFee = new BigNumber(settings.contributionFlatFee)
@@ -168,6 +186,8 @@ async function contribute(body) {
 
     const amountAfterFee = _amount.minus(feeAmount).minus(clFeeAmount)
 
+    console.log("1")
+
     let tx = new TransactionBuilder(sourceAccount, {
         fee,
         networkPassphrase: Networks[STELLAR_NETWORK]
@@ -183,7 +203,7 @@ async function contribute(body) {
         selling: asset,
         buying: Asset.native(),
         price: "1",
-        amount: amountAfterFee
+        amount: amountAfterFee.toFixed(7)
     }))
 
     tx.addOperation(Operation.manageSellOffer({
@@ -191,21 +211,21 @@ async function contribute(body) {
         selling: Asset.native(),
         buying: asset,
         price: "1",
-        amount: amountAfterFee
+        amount: amountAfterFee.toFixed(7)
     }))
 
     tx.addOperation(Operation.payment({
         source: source,
         destination: feePK,
         asset: Asset.native(),
-        amount: feeAmount
+        amount: feeAmount.toFixed(7)
     }))
 
     tx.addOperation(Operation.payment({
         source: source,
-        destination: feePK,
+        destination: settings.createdBy,
         asset: Asset.native(),
-        amount: clFeeAmount
+        amount: clFeeAmount.toFixed(7)
     }))
 
     tx = tx.setTimeout(0).build()
@@ -251,21 +271,20 @@ function isCrowdLotterySuccessful(crowdlotteryAccount) {
     return false
 }
 
-async function isLocked(account) {
+function isLocked(account) {
+
     let sum_weight = 0
     for (const signer of account.signers) {
         sum_weight += signer.weight
     }
 
-    if (sum_weight < account.thresholds.lowThreshold &&
-        sum_weight < account.thresholds.midThreshold &&
-        sum_weight < account.thresholds.highThreshold) {
+    if (sum_weight == 0) {
         return true
     }
     return false
 }
 
-async function lock(tx, publicKey, signers) {
+function lock(tx, publicKey, signers) {
 
     for (const signerPK of signers) {
         tx.addOperation(Operation.setOptions({
@@ -282,7 +301,7 @@ async function lock(tx, publicKey, signers) {
         lowThreshold: signers.length,
         medThreshold: signers.length,
         highThreshold: signers.length,
-        source: issuer
+        source: publicKey
     }));
 
     return tx;
@@ -312,8 +331,12 @@ function decodeManageDataString(str) {
 // }
 
 async function getBalance(account, assetCode, issuer) {
+    console.log("getBalance")
+    console.log(account)
+
     for (const balance of account.balances) {
-        if (balance.asset_type.beginsWith("credit_") &&
+        console.log(`${balance.asset_type} ${balance.asset_code} ${balance.asset_issuer}`)
+        if (balance.asset_type.startsWith("credit") &&
             balance.asset_code == assetCode &&
             balance.asset_issuer == issuer){
                 return balance.balance
