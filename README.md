@@ -1,5 +1,7 @@
 # txF-crowdlottery
 
+Locks NFT/token into a “crowdlottery” txfunction. The NFT/token will be distributed to contributors later depending on the parametrization. The parametrization can be used to create a crowdfunding or a lottery or something in between.
+
 To run:
 ```
 rollup -c
